@@ -1,10 +1,16 @@
 from langchain_groq import ChatGroq
-from ingestion import get_column_info, retrive_releavant_data
+from ingestion import get_column_info, retrive_releavant_data , get_columns,get_dataframes
 import json
 import pandas as pd
 import re
 from quickchart import QuickChart
+import os
 qc = QuickChart()
+
+
+global dataframes 
+dataframes = get_dataframes()
+
 
 # LLM Instances
 sql_llm = ChatGroq(
@@ -29,32 +35,70 @@ data_llm = ChatGroq(
 )
 
 
+
+
+
+
+
+
+
+def get_tables_info(folder_path=r'C:\Desktop\experiments\data_analytics\database'):
+    tables = {}
+    
+    for file in os.listdir(folder_path):
+        if file.endswith(".csv"):
+            file_path = os.path.join(folder_path, file).replace("\\", "/")  # Normalize path
+            tables[os.path.splitext(file)[0]] = get_columns(file_path)
+    
+    return tables
+
+
+
+
+
+
 def planner(user_prompt):
     """
-    Uses LLM to generate structured SQL-specific prompts and visualization prompts if applicable.
+    Uses LLM to identify relevant tables and generate structured SQL-specific prompts.
+    Each prompt is mapped to the appropriate table(s).
     """
+    tables = get_tables_info()  # Fetch table metadata
+
+    # Convert table info into a string format for LLM context
+    table_schema = json.dumps(tables, indent=4)
+
     planning_prompt = f"""
         ### Instructions:
         - Ensure the output is **only** the JSON object, without any extra text.
+        - Use the given table schemas to determine the right tables for each request.
+        - Do NOT generate SQL queries—just structured prompts.
+        - Use only the table names mentioned in the Available Tables
+
+        ### Available Tables:
+        {table_schema}
 
         ### Task:
-        - Decompose the user request into **separate SQL-specific prompts**.
-        - Each prompt should be **a single query** targeting specific data.
-        - Ensure clarity in each prompt for accurate SQL generation.
-        - Identify if the request explicitly mentions visualization (e.g., "show", "plot", "graph", "chart", "trend", "distribution", "pattern", "visualize").
-        - If the request does not mention visualization but involves comparing trends over time or distributions, include a visualization key.
-        - If the request is purely numerical or textual data retrieval, do NOT generate a visualization.
+        - Identify the relevant table(s) for each part of the request.
+        - Generate **clear SQL-specific prompts** to query the data.
+        - Ensure each prompt explicitly **mentions the relevant table(s)**.
+        - If a request involves multiple tables, list all necessary tables.
 
         ### Example:
-        **User Request:** "Compare the average revenues of GOOG and AAPL from 2021 to 2023 and show it in a bar chart."
+        **User Request:** "Compare the average revenues of GOOG and AAPL from 2021 to 2023."
 
         **Generated Output:**
         {{
             "prompts": [
-                "Get the average revenue of AAPL from 2021 to 2023.",
-                "Get the average revenue of GOOG from 2021 to 2023."
+                {{
+                    "prompt": "Retrieve the average revenue of AAPL for years 2021 to 2023 from the financials table.",
+                    "tables": ["financials"]
+                }},
+                {{
+                    "prompt": "Retrieve the average revenue of GOOG for years 2021 to 2023 from the financials table.",
+                    "tables": ["financials"]
+                }}
             ],
-            "visualization": "Generate a bar chart comparing the average revenues of GOOG and AAPL from 2021 to 2023. Ensure axis labels and units are clearly defined."
+            "visualization": "Generate a bar chart comparing the average revenues of GOOG and AAPL from 2021 to 2023."
         }}
 
         ### User Request:
@@ -62,50 +106,90 @@ def planner(user_prompt):
     """
 
     response = planner_llm.invoke(planning_prompt).content.strip()
-    print(response)
+    print(response)  # Debugging: See LLM response
 
     try:
         parsed_response = json.loads(response)
-        sql_prompts = parsed_response.get("prompts", [])
+        prompts = parsed_response.get("prompts", [])
         visualization_prompt = parsed_response.get("visualization", None)
     except json.JSONDecodeError:
-        sql_prompts = [user_prompt]  # Fall back if LLM output is incorrect
+        prompts = [{"prompt": user_prompt, "tables": []}]  # Fallback
         visualization_prompt = None
     
-    return sql_prompts, visualization_prompt
+    return prompts, visualization_prompt
 
-
-def generate_sql_query(sub_prompt):
+def generate_sql_query(sub_prompt, data_dict):
     """
     Converts an SQL prompt into an actual SQL query.
     """
-    column_info,categorical_values= get_column_info()
-    column_str = "\n".join([f"{col}: {dtype}" for col, dtype in column_info.items()])
+    column_info, categorical_values = get_column_info(data_dict)
 
-    llm_prompt = f"""
-        Instruction:
+    # Format column info properly for each table
+    column_str = "\n\n".join([
+        f"Table: {table}\n" + "\n".join([f"  {col}: {dtype}" for col, dtype in cols.items()])
+        for table, cols in column_info.items()
+    ])
 
-        - Return only the SQL query, nothing else.
-        - The table name is **data** and must be written **plainly** without backticks (` `).
-        - Do NOT include any quotations around the SQL query; return it as a plain string.
-        - Represent **column names only** in SQL format using backticks (`` `column_name` ``).
-        - Ensure the SQL syntax is valid for querying a Pandas DataFrame with SQLite.
-        - Design the query to be comprehensive and context-rich, including all columns necessary to fully address the user’s request, considering that the results will be summarized by another LLM.
-        - Infer the user’s intent intelligently: include relevant dimensions (e.g., time periods, identifiers) and metrics that provide a complete picture, even if not explicitly requested, unless it contradicts the user’s intent.
-        - Avoid overly generic or incomplete queries; prioritize clarity and utility for downstream analysis and summarization.
-        - Use precise conditions to filter data based on the user’s request (e.g., exact ticker, year range, categories), and order results logically (e.g., by year) when applicable.
+    # llm_prompt = f"""
+    #     Instruction:
 
-        Database Schema:
-        {column_str}
+    #     - Return only the SQL query, nothing else.
+    #     - Use **only the exact table names** from the provided database schema.
+    #     - Do NOT include any quotations around the SQL query; return it as a plain string.
+    #     - Represent **column names only** in SQL format using backticks (`` `column_name` ``).
+    #     - Ensure the SQL syntax is valid for querying a Pandas DataFrame with SQLite.
+    #     - Design the query to be comprehensive and context-rich, including all columns necessary to fully address the user’s request, considering that the results will be summarized by another LLM.
+    #     - Infer the user’s intent intelligently: include relevant dimensions (e.g., time periods, identifiers) and metrics that provide a complete picture, even if not explicitly requested, unless it contradicts the user’s intent.
+    #     - Avoid overly generic or incomplete queries; prioritize clarity and utility for downstream analysis and summarization.
+    #     - Use precise conditions to filter data based on the user’s request (e.g., exact ticker, year range, categories), and order results logically (e.g., by year) when applicable.
 
-        Categorical Mappings:
-        {json.dumps(categorical_values, indent=2)}
+    #     Database Schema:
+    #     {column_str}
 
-        User Request:
-        {sub_prompt}
+    #     Categorical Mappings:
+    #     {json.dumps(categorical_values, indent=2)}
+
+    #     User Request:
+    #     {sub_prompt}
+    # """
+
+
+    llm_prompt = f"""         
+    Instruction:          
+    - Return only the SQL query, nothing else.         
+    - In the SQL query, use "self" as the table name, do not use exact table names.
+    - Do NOT include any quotations around the SQL query; return it as a plain string.         
+    - Represent **column names only** in SQL format using backticks (`` `column_name` ``).         
+    - Ensure the SQL syntax is valid for querying a Pandas DataFrame with SQLite.
+
+    - IMPORTANT: Always include contextual identifier columns in your query results:
+    * Always include primary key or identifier columns that uniquely identify rows
+    * Always include date/time columns when present in the schema
+    * Always include categorical columns that provide important context
+
+    - Generate comprehensive queries that provide sufficient context for downstream LLMs:
+    * When a user asks for a specific metric or attribute, include related fields that help contextualize that data
+    * Always include 2-4 additional relevant columns beyond what was explicitly requested
+    * For numerical data, include related metrics when they provide useful context
+    * For time-based queries, include sequential periods for trend analysis when possible
+
+    - Label your columns clearly in the SELECT statement to avoid ambiguity between multiple query results
+    - Use precise conditions in WHERE clauses to filter data based on the user's request
+    - Order results logically (chronologically for time series, alphabetically for categorical comparisons)
+    - Do not omit the main columns requested by the user
+
+    Database Schema:         
+    {column_str}          
+
+    Categorical Mappings:         
+    {json.dumps(categorical_values, indent=2)}          
+
+    User Request:         
+    {sub_prompt}     
     """
 
-    response = sql_llm.invoke(llm_prompt).content.strip()
+
+    response = data_llm.invoke(llm_prompt).content.strip()
     return response
 
 
@@ -114,25 +198,38 @@ def execute_queries(sql_prompts):
     Executes multiple SQL queries and merges results.
     """
     combined_df = pd.DataFrame()
-    
-    for prompt in sql_prompts:
-        sql_query = generate_sql_query(prompt)
+    data_dict = {}
+
+    for p in sql_prompts:
+        prompt = p['prompt']
+        table_names = p['tables']
+
+        # Collect relevant tables into data_dict
+        data_dict = {table: dataframes[table] for table in table_names if table in dataframes}
+
+        required_data = []
+        for table in table_names:
+            required_data.append(dataframes[table])
+
+        sql_query = generate_sql_query(prompt, data_dict)
         print(sql_query)
-        result_df = retrive_releavant_data(sql_query)
+        
+        result_df = retrive_releavant_data(sql_query,required_data)
         
         if not result_df.empty:
             result_df["query_step"] = prompt  # Tag data with its step
             combined_df = pd.concat([combined_df, result_df], ignore_index=True)
+            # combined_df.append(result_df)
 
     return combined_df
+
 
 
 def summarize_data_result(result_df, user_prompt):
     """
     Summarizes the retrieved SQL data.
     """
-    if result_df.empty:
-        return "No relevant data found."
+
 
     result_json = result_df.to_json()
 
@@ -158,6 +255,10 @@ def summarize_data_result(result_df,user_prompt):
     - Converts DataFrame to JSON.
     - Passes it to `data_llm` for natural language summarization.
     """
+    # for d in results_df:
+    #     result_json = d.to_json()
+
+
     result_json = result_df.to_json()
 
     summary_prompt = f"""
@@ -191,6 +292,12 @@ def visusalize(result_df , user_prompt):
      Ensure the output is **only** the JSON  without any extra text. Do not include any backticks or json written just return the json 
      Follows JSON standard syntax, which is compatible with APIs like QuickChart.io.
      Uses double quotes (") for keys and strings, which is  valid JSON.
+    - Return the JSON in a format that is fully compatible with Python's `json.loads()`.
+    - Do NOT include JavaScript functions inside the JSON (e.g., inside "tooltip" callbacks).
+    - If necessary, return function-based values as **strings** instead.
+    - Ensure all keys and values are properly formatted as valid JSON data types (strings, numbers, arrays, objects, booleans, or null).
+    - Do NOT use undefined variables or symbols that are not valid in JSON.
+
      Do NOT include explanations, comments, or extra text—just return the JSON.
     I want you to act as a Chart is visualization expert. Your primary goal is to generate valid and clearly labeled Chart. js configuration objects based on user requests. These configurations should-be directly usable within a Chart.js environment.
     Input: You will receive user requests describing the desired visualization. These requests may include:
@@ -267,6 +374,11 @@ def process_user_query(user_prompt):
 
 # print(generate_sql_query("Compare EPS of google and microsoft"))
 
+# planner('get revenues of google after 2021')
+
+print(process_user_query("Analyse EPS of google in year 2021 and 2022"))
+
+
 
 import streamlit as st
 import pandas as pd
@@ -306,4 +418,4 @@ if user_input := st.chat_input("Ask something about the data..."):
         st.image(visualisation)
     
     # Save response to chat history
-    st.session_state["messages"].append({"role": "assistant", "content": response})
+    st.session_state["messages"].append({"role": "assistant", "content": response,"visualisation":visualisation})
