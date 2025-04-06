@@ -1,30 +1,92 @@
 import pandas as pd
 from pandasql import sqldf
-
+import polars as pl
+import os
 # Load the dataset
-data = pd.read_csv(r'data.csv')
+# data = pd.read_csv(r'C:\Desktop\experiments\data_analytics\database\Financial_corporate_data.csv')
+
+data = pl.read_csv(r'C:\Desktop\experiments\data_analytics\database\Financial_corporate_data.csv')
 
 # 1️⃣ Function to return column names and their data types
-# def get_column_info():
-#     df = data.copy()
-#     return df.dtypes.to_dict()
 
 
-def get_column_info():
+def get_dataframes(folder_path =r"C:\Desktop\experiments\data_analytics\database" ):
+    csv_dataframes = {}
+
+    # Iterate through files in the folder
+    for file in os.listdir(folder_path):
+        if file.endswith(".csv"):  # Check if the file is a CSV
+            file_path = os.path.join(folder_path, file)
+            try:
+            
+                df = pl.read_csv(file_path)  # Read CSV file into a dataframe
+            except:
+                df = pl.read_csv(file_path,encoding="ISO-8859-1")
+            csv_dataframes[os.path.splitext(file)[0]] = df  # Store in dictionary
+
+    return csv_dataframes
+
+
+
+
+
+def get_column_info(data_dict):
     """
-    Extracts column names and data types dynamically.
-    Also retrieves unique values for categorical columns (e.g., company names).
+    Extracts column data types and categorical mappings for all tables in data_dict.
     """
-    df = data.copy()
-    column_info = df.dtypes.to_dict()
-
-    # Collect possible categorical values (e.g., company names, categories, etc.)
+    column_info = {}
     categorical_values = {}
-    for col in df.select_dtypes(include=["object"]).columns:
-        unique_vals = df[col].dropna().unique().tolist()
-        categorical_values[col] = unique_vals[:50]  # Limit for efficiency
+
+    for table_name, df in data_dict.items():
+        column_info[table_name] = {col: str(df[col].dtype) for col in df.columns}
+
+        # Extract categorical values for non-numeric columns (if needed)
+        # categorical_values[table_name] = {
+        #     col: df[col].unique().tolist()
+        #     for col in df.select_dtypes(exclude=['number']).columns
+        # }
+        try:
+            categorical_values[table_name] = {
+                col: df[col].unique()[:30].to_list()
+                for col in df.columns if df[col].dtype == pl.Utf8
+            }
+
+        #scenariosn where tehre are less than 30 categorical values 
+        except:
+             categorical_values[table_name] = {
+                col: df[col].unique().to_list()
+                for col in df.columns if df[col].dtype == pl.Utf8
+            }
+
+
 
     return column_info, categorical_values
+
+
+# def get_columns(file_path):
+#     # df = pd.read_csv(file_path, encoding="ISO-8859-1")
+
+#     try:
+#         df = pd.read_csv(file_path)
+#     except:
+#         df = pd.read_csv(file_path, encoding="ISO-8859-1")
+
+    
+#     # Convert dtypes to string so they are JSON serializable
+#     column_info = {col: str(dtype) for col, dtype in df.dtypes.items()}
+    
+#     return column_info
+
+
+def get_columns(file_path):
+    try:
+        df = pl.read_csv(file_path)
+    except:
+        df = pl.read_csv(file_path, encoding="ISO-8859-1")
+
+    column_info = {col: str(dtype) for col, dtype in zip(df.columns, df.dtypes)}
+    return column_info
+
 
 
 
@@ -46,21 +108,33 @@ def filter_data(df, query_conditions):
 
 
 
-def retrive_releavant_data(data_query):
-    df = data.copy()
-    filtered_df = sqldf(data_query, {"data":df})
+# def retrive_releavant_data(data_query,dicto={"data":data}):
+#     # df = data.copy()
+#     filtered_df = sqldf(data_query, dicto)
+#     return filtered_df
+
+def retrive_releavant_data(data_query,required_data):
+    filtered_df = required_data[0].sql(data_query).to_pandas()
     return filtered_df
 
 
-# query = """
-# SELECT `Earnings per Share` FROM data WHERE `Calendar Year` BETWEEN 2019 AND 2023 AND `Ticker` = 'GOOG'
+query = """
+SELECT `Earnings per Share` FROM self WHERE `Calendar Year` BETWEEN 2019 AND 2023 AND `Ticker` = 'GOOG'
 
-# """
-# print(retrive_releavant_data(query))
-# print(get_column_info())
+"""
+
+
+# print(data.sql(query).to_pandas())
+
+# print(retrive_releavant_data(query,{"data":data}))
+# a,b = get_column_info({"data":data})
+
+# print(b)
 
 # print(data.describe(include = 'all'))
 
 # print(data['Ticker'].unique())
 
 # print(get_column_info())
+
+# print(data.select_dtypes(include = ['category']))
